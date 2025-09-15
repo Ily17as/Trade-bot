@@ -14,7 +14,7 @@ The main value is accurate stock valuation predictions to increase traders' conf
 - **TrendSpider** — custom heat maps and a fully automated AI trading bot.  
 - **Danelfin** — reliable service assigning each stock an AI-generated score from 1 to 10.  
 
-Our approach is unique: we combine **DL + CV + Reinforcement Learning + Monte Carlo**, which has not been tested in combination before.
+Our approach is unique: we combine **DL + CV + Reinforcement Learning + Stochastic Market Models**, which has not been tested in combination before.
 
 ## ML Pipeline Architecture
 1. **Data Collection**  
