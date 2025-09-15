@@ -3,7 +3,7 @@
 Automatic stock trader based on ML/DL models.
 
 ## Project Description
-The goal of this project is to develop an auto-trader for the stock market that, using several ML models (Computer Vision, Deep Learning, Reinforcement Learning, Monte Carlo), will determine whether a stock is:
+The goal of this project is to develop an auto-trader for the stock market that, using several ML models (Computer Vision, Deep Learning, Reinforcement Learning, Stochastic Market Models), will determine whether a stock is:
 - undervalued,
 - fairly valued,
 - overvalued.
