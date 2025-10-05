@@ -1,9 +1,10 @@
 pandas>=2.2
 pyarrow>=16
-duckdb>=1.1
 requests>=2.32
 yfinance>=0.2
 tinkoff-investments>=0.2
 tqdm>=4.66
 python-dateutil>=2.9
 mplfinance>=0.12
+scikit-learn
+numpy
