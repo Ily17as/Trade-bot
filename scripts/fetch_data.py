@@ -59,7 +59,7 @@ def fetch_tinkoff_chunked(figi: str, tf: str, start: datetime, end: datetime) ->
 
 def fetch_moex_history(secid: str, tf: str, date_from: str, date_till: str) -> pd.DataFrame:
     # MOEX поддерживает интервалы: 1,10,60,1440
-    tf_map = {"1m": 1, "5m": 10, "1h": 60, "1d": 1440}
+    tf_map = {"1m": 1, "10m": 10, "1h": 60, "1d": 1440}
     interval = tf_map[tf]
     base = "https://iss.moex.com/iss/history/engines/stock/markets/shares/boards/TQBR/securities/{sec}/candles.json"
     url = base.format(sec=secid)
@@ -81,7 +81,7 @@ def fetch_moex_history(secid: str, tf: str, date_from: str, date_till: str) -> p
     df = pd.concat(out, ignore_index=True)
     if "begin" in df.columns:
         df = df.rename(columns={"begin": "time"})
-    df["time"] = pd.to_datetime(df["time"])
+    df["time"] = pd.to_datetime(df["time"]).dt.tz_localize("Europe/Moscow").dt.tz_convert("UTC")
     return df[["time","open","high","low","close","volume"]].sort_values("time")
 
 def fetch_yf(symbol, tf, start):
