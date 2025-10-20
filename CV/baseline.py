@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torchvision as tv
 from torch.utils.data import Dataset, DataLoader
+import joblib
 
 # ---------- настройки ----------
 MANIFEST = r"../data/cv/images/SBER/5m/batch_0.csv"  # путь к манифесту
@@ -140,3 +141,6 @@ for epoch in range(EPOCHS):
             correct += (pred == yb).sum().item()
             total += yb.numel()
     print(f"epoch {epoch:02d} | train_loss={loss_sum/max(1,len(tr_ds)):.4f} | val_acc={correct/max(1,total):.3f}")
+
+# joblib.dump(m.cpu(), "../models/cv_resnet18.pkl")
+torch.save(m.cpu().state_dict(), "../models/cv_resnet18.pt")

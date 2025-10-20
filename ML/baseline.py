@@ -1,4 +1,5 @@
 import numpy as np, pandas as pd, lightgbm as lgb
+import joblib
 
 FEAT_LBL, H = "../data/features/ml/SBER/5m/features_labeled.parquet", 36
 df = pd.read_parquet(FEAT_LBL).sort_values("time")
@@ -49,3 +50,5 @@ m = lgb.train(params, dtr, num_boost_round=800)
 proba = m.predict(X[va])                         # shape [N,3] порядок классов {0,1,2}={down,flat,up}
 p_dn, p_fl, p_up = proba[:,0], proba[:,1], proba[:,2]
 score = p_up - p_dn
+
+joblib.dump(m, "../models/SBER_5m_lgbm.pkl")
