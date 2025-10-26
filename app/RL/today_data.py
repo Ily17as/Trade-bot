@@ -16,11 +16,11 @@ TF     = os.getenv("TF", "5m")      # "5m"/"15m"/"1h"
 H      = int(os.getenv("H", "36"))  # для 5m и 180 мин → 36
 
 # Источник всех фич (история)
-FEAT_SRC   = os.getenv("FEAT_SRC",  f"../data/features/ml/{TICKER}/{TF}/features_labeled.parquet")
+FEAT_SRC   = os.getenv("FEAT_SRC",  f"../../data/features/ml/{TICKER}/{TF}/features_labeled.parquet")
 # Куда положить «сегодня»
-FEAT_TODAY = os.getenv("FEAT_TODAY",f"../data/features/ml/{TICKER}/{TF}/features_today.parquet")
+FEAT_TODAY = os.getenv("FEAT_TODAY",f"../../data/features/ml/{TICKER}/{TF}/features_today.parquet")
 # Куда положить манифест картинок «сегодня»
-CV_MANIFEST= os.getenv("CV_MANIFEST",f"../data/cv/images/{TICKER}/{TF}/today_manifest.csv")
+CV_MANIFEST= os.getenv("CV_MANIFEST",f"../../data/cv/images/{TICKER}/{TF}/today_manifest.csv")
 
 # Рендер картинок (совместимо с твоим scripts.render_cv_images)
 RENDER_SIZE = 64
