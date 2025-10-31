@@ -15,7 +15,7 @@ CV_MANIFEST= f"../data/cv/images/{TICKER}/{TF}/today_manifest.csv"         # м�
 
 # Пути моделей (уже обучены и сохранены)
 ML_MODEL_PKL = "../models/SBER_5m_lgbm.pkl"         # joblib.dump(...) или pickle.dump(...)
-CV_MODEL_PKL = "../models/cv_resnet18.pt"       # torch.save(model, ...)
+CV_MODEL_PKL = "../models/cv_resnet18.pt"       # torch.save(models, ...)
 # ==========================================
 
 
@@ -71,7 +71,7 @@ def infer_ml(model_path: str, feat_path: str, H: int):
     last = dict(P_down=float(p_dn[-1]), P_flat=float(p_fl[-1]), P_up=float(p_up[-1]), score=float(score[-1]))
     return last, "ok"
 
-# ---------- 2) CV-инференс (ResNet, torch.save(model, ...)) ----------
+# ---------- 2) CV-инференс (ResNet, torch.save(models, ...)) ----------
 def infer_cv(model_path: str, manifest_csv: str):
     import os, numpy as np, pandas as pd
     from pathlib import Path
