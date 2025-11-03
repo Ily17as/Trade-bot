@@ -1,54 +1,93 @@
-import numpy as np, pandas as pd, lightgbm as lgb
-import joblib
+# baseline_xgb.py
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import classification_report, confusion_matrix
+import xgboost as xgb
 
-FEAT_LBL, H = "../data/features/ml/SBER/5m/features_labeled.parquet", 36
-df = pd.read_parquet(FEAT_LBL).sort_values("time")
+# Путь к файлу (на твоей машине)
+PATH = "../../data/SBER_dataset_5m.csv"
 
-# 1) метка
-y_raw = df.get(f"y_tb_{H}", df.get(f"y_tb_ft_{H}"))
-if y_raw is None: raise KeyError("нет колонки метки")
-y = (pd.to_numeric(y_raw.replace([np.inf,-np.inf], np.nan), errors="coerce")
-       .dropna()
-       .astype(np.int8))
-df = df.loc[y.index].reset_index(drop=True)   # синхронизируем
+df = pd.read_csv(PATH, parse_dates=['time'], infer_datetime_format=True)
+# Подставь правильное имя столбца времени
+if 'time' in df.columns:
+    df = df.sort_values('time').reset_index(drop=True)
+else:
+    df = df.sort_values(df.columns[0]).reset_index(drop=True)
 
-# 2) матрица признаков: только числовые/булевы
-drop_cols = [c for c in df.columns if c.startswith(("y_tb_","ret_fwd_"))] + ["time"]
-X = df.drop(columns=drop_cols, errors="ignore")
+# Простые признаки
+df['close'] = df['close'].astype(float)
+df['logret'] = np.log(df['close']).diff()
+df['ret_1'] = df['logret'].shift(1)
+for w in [3,5,10,20]:
+    df[f'sma_{w}'] = df['close'].rolling(window=w).mean()
+    df[f'std_{w}'] = df['logret'].rolling(window=w).std()
 
-# удалим object/строки (например, 'date') или закодируй при желании
-obj_cols = X.select_dtypes(include=["object"]).columns.tolist()
-if obj_cols:
-    print("drop object cols:", obj_cols)
-    X = X.drop(columns=obj_cols)
+# ATR (упрощённо)
+df['high'] = df['high'].astype(float)
+df['low']  = df['low'].astype(float)
+df['tr1'] = (df['high'] - df['low'])
+df['tr2'] = (df['high'] - df['close'].shift(1)).abs()
+df['tr3'] = (df['low'] - df['close'].shift(1)).abs()
+df['tr'] = df[['tr1','tr2','tr3']].max(axis=1)
+df['atr_14'] = df['tr'].rolling(14).mean()
 
-# привести bool→uint8, ffill + нули
-for c in X.select_dtypes(include=["bool"]).columns: X[c] = X[c].astype(np.uint8)
-X = (X.replace([np.inf,-np.inf], np.nan)
-       .ffill()
-       .fillna(0.0))
+# Label: triple-barrier simplified -> use next k returns and ATR thresholds
+H = 3  # horizon steps (3*5min = 15min)
+tp_atr = 0.5  # take profit multiplier
+sl_atr = 0.5  # stoploss multiplier
 
-print("label dist:", y.value_counts(dropna=False).to_dict())
+df['future_max'] = df['close'].shift(-1).rolling(window=H).max().shift(-(H-1))
+df['future_min'] = df['close'].shift(-1).rolling(window=H).min().shift(-(H-1))
+df['target'] = 0  # 1 up, -1 down, 0 flat
 
-y2 = (y+1).astype(int)                          # {0,1,2}
+# dynamic barriers
+df['tp'] = df['close'] + tp_atr * df['atr_14']
+df['sl'] = df['close'] - sl_atr * df['atr_14']
 
-# class weights
-freq = y2.value_counts(normalize=True)
-wmap = {k:1/max(1e-9,freq.get(k,1e-9)) for k in [0,1,2]}
-w = y2.map(wmap)
+# If future_max crosses tp => up, elif future_min crosses sl => down, else flat
+df.loc[df['future_max'] >= df['tp'], 'target'] = 1
+df.loc[df['future_min'] <= df['sl'], 'target'] = -1
 
-# простой временной сплит: train < последний месяц, val = последний месяц
-ts = pd.to_datetime(df["time"])
-cut = ts.max() - pd.Timedelta(days=30)
-tr, va = ts < cut, ts >= cut
+# Dropna and features
+feats = ['ret_1', 'sma_3','sma_5','sma_10','std_3','std_5','std_10','atr_14']
+data = df.dropna(subset=feats + ['target']).reset_index(drop=True)
+X = data[feats]
+y = data['target'].map({-1:0, 0:1, 1:2})  # map to 3 classes for classifier
 
-dtr = lgb.Dataset(X[tr], label=y2[tr], weight=w[tr])
-params = dict(objective="multiclass", num_class=3, learning_rate=0.05,
-              num_leaves=63, feature_fraction=0.8, bagging_fraction=0.8,
-              bagging_freq=1, min_data_in_leaf=100, metric="multi_logloss")
-m = lgb.train(params, dtr, num_boost_round=800)
-proba = m.predict(X[va])                         # shape [N,3] порядок классов {0,1,2}={down,flat,up}
-p_dn, p_fl, p_up = proba[:,0], proba[:,1], proba[:,2]
-score = p_up - p_dn
+# Time split (train last)
+tscv = TimeSeriesSplit(n_splits=5)
+split = list(tscv.split(X))
+train_idx, test_idx = split[-1]  # last fold
+X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
 
-joblib.dump(m, "../models/SBER_5m_lgbm.pkl")
+dtrain = xgb.DMatrix(X_train, label=y_train)
+dtest = xgb.DMatrix(X_test, label=y_test)
+params = {
+    'objective':'multi:softprob',
+    'num_class':3,
+    'eval_metric':'mlogloss',
+    'tree_method':'hist',
+    'learning_rate':0.05,
+    'max_depth':6,
+    'seed':42
+}
+bst = xgb.train(params, dtrain, num_boost_round=200,
+                evals=[(dtrain,'train'), (dtest,'test')], early_stopping_rounds=20, verbose_eval=False)
+
+y_pred = np.argmax(bst.predict(dtest), axis=1)
+print(classification_report(y_test, y_pred, digits=4))
+print(confusion_matrix(y_test, y_pred))
+
+
+bst.save_model("xgb_sber.model")        # бинарный формат XGBoost
+bst.save_model("xgb_sber.json")         # json формат (читаемый)
+
+
+# Загрузка
+bst2 = xgb.Booster()
+bst2.load_model("xgb_sber.model")
+# Для предсказания на numpy/pandas:
+dtest = xgb.DMatrix(X_test)   # X_test — DataFrame/np.array
+probs = bst2.predict(dtest)

@@ -1,146 +1,166 @@
+# baseline_cpu_nothreads.py
+# requirements: timm, torch, torchvision, tqdm, pandas, pillow
 import os
-import numpy as np
-import pandas as pd
-from PIL import Image
+import json
+import time
+from pathlib import Path
 
 import torch
-import torch.nn as nn
-import torchvision as tv
-from torch.utils.data import Dataset, DataLoader
-import joblib
+import timm
+from torch import nn, optim
+from torchvision import transforms
+from torch.utils.data import DataLoader, Dataset
+from PIL import Image
+import pandas as pd
+from tqdm.auto import tqdm
 
-# ---------- настройки ----------
-MANIFEST = r"../data/cv/images/SBER/5m/batch_0.csv"  # путь к манифесту
-PROJECT_ROOT = os.path.abspath("../..")                 # корень проекта для относительных путей
-SEED = 42
-EPOCHS = 8
-BATCH = 256
+# ----------------- CONFIG -----------------
+MODEL_DIR = Path("models")
+MODEL_DIR.mkdir(exist_ok=True)
+LABELS_CSV = "../../data/labels.csv"      # adjust if needed
+IMAGES_ROOT = "../../cv_candles_seq/images"
+MODEL_NAME = "convnext_tiny"              # light model for CPU
+PRETRAINED = True                         # set False to avoid downloading weights
+BATCH_SIZE = 16                           # smaller for CPU
+VAL_BATCH = 64
+NUM_EPOCHS = 10
+DEVICE = torch.device("cpu")
+# ------------------------------------------
 
-# ---------- загрузка и починка манифеста ----------
-LABELS_MAP = {"down": 0, "flat": 1, "up": 2, -1: 0, 0: 1, 1: 2}
+print("PyTorch device:", DEVICE)
+print("Using timm model:", MODEL_NAME, "pretrained=", PRETRAINED)
 
-def load_manifest(path_csv: str, root: str | None = None) -> pd.DataFrame:
-    df = pd.read_csv(path_csv)
-    if "label" not in df.columns or "path" not in df.columns:
-        raise KeyError("В манифесте должны быть колонки 'path' и 'label'.")
+# ---- load labels csv and build label_map ----
+df = pd.read_csv(LABELS_CSV)
+df['label'] = df['label'].astype(str).str.strip().str.lower()
 
-    # 1) нормализуем метки: принимаем строки и {-1,0,1}
-    lab = pd.to_numeric(df["label"], errors="coerce")
-    if lab.notna().any():
-        df["label"] = lab.map(LABELS_MAP)
-    else:
-        s = df["label"].astype(str).str.lower().str.strip()
-        s = s.replace({"none": "", "nan": "", "": np.nan})
-        df["label"] = s.map(LABELS_MAP)
+print("Unique labels in CSV:", sorted(df['label'].unique().tolist()))
+unique_labels = sorted(df['label'].unique())
+label_to_idx = {lab: idx for idx, lab in enumerate(unique_labels)}
+df['label_idx'] = df['label'].map(label_to_idx).astype(int)
+df['filename'] = df['filename'].apply(lambda x: os.path.join(IMAGES_ROOT, x))
 
-    # 2) чиним пути: если файла нет, пробуем прибавить root
-    def fix_path(p):
-        if not isinstance(p, str):
-            return None
-        p_norm = os.path.normpath(p)
-        if os.path.isfile(p_norm):
-            return p_norm
-        if root:
-            q = os.path.normpath(os.path.join(root, p_norm))
-            return q if os.path.isfile(q) else None
-        return None
-
-    df["path"] = df["path"].map(fix_path)
-
-    # 3) фильтры
-    keep = df["label"].notna() & df["path"].notna()
-    df = df[keep].copy()
-
-    # временной сплит по t_end если есть
-    if "t_end" in df.columns:
-        df["t_end"] = pd.to_datetime(df["t_end"], errors="coerce")
-        df = df.dropna(subset=["t_end"]).sort_values("t_end")
-
-    if len(df) == 0:
-        raise ValueError("После нормализации пусто: проверь значения 'label' и столбец 'path'.")
-
-    df["label"] = df["label"].astype(int)
-    return df
-
-df = load_manifest(MANIFEST, root=PROJECT_ROOT)
-print("rows:", len(df))
-print("label dist:", df["label"].value_counts().to_dict())
-print("exists %:", df["path"].map(os.path.isfile).mean())
-
-# ---------- сплиты ----------
-rng = np.random.RandomState(SEED)
-if "t_end" in df.columns:
-    cut = df["t_end"].max() - pd.Timedelta(days=30)
-    tr_df = df[df["t_end"] < cut]
-    va_df = df[df["t_end"] >= cut]
-    if len(tr_df) == 0 or len(va_df) == 0:
-        msk = rng.rand(len(df)) < 0.8
-        tr_df, va_df = df[msk], df[~msk]
+# quick sanity checks
+missing = (~df['filename'].apply(os.path.exists)).sum()
+if missing:
+    print(f"Warning: {missing} image paths not found. First missing (if any):")
+    print(df.loc[~df['filename'].apply(os.path.exists), 'filename'].head(3))
 else:
-    msk = rng.rand(len(df)) < 0.8
-    tr_df, va_df = df[msk], df[~msk]
+    print("All image paths exist (quick check).")
 
-assert len(tr_df) > 0 and len(va_df) > 0, "Нужно >0 объектов в train и val"
-print(f"train={len(tr_df)}  val={len(va_df)}")
+# save meta
+meta = {"label_to_idx": label_to_idx, "input_size": [3, 224, 224], "model_name": MODEL_NAME}
+with open(MODEL_DIR / "meta.json", "w") as f:
+    json.dump(meta, f, indent=2)
 
-# ---------- датасет ----------
-class ImgDS(Dataset):
-    def __init__(self, frame: pd.DataFrame):
-        self.df = frame.reset_index(drop=True)
-        self.t = tv.transforms.Compose([
-            tv.transforms.Grayscale(num_output_channels=1),
-            tv.transforms.ToTensor(),                 # -> [1, 64, 64]
-            tv.transforms.Normalize([0.5], [0.5]),
-        ])
-    def __len__(self): return len(self.df)
+# ---- Dataset ----
+class ImgDataset(Dataset):
+    def __init__(self, df, transform):
+        self.df = df.reset_index(drop=True)
+        self.transform = transform
+    def __len__(self):
+        return len(self.df)
     def __getitem__(self, i):
-        p = self.df.path[i]
-        x = self.t(Image.open(p).convert("L"))
-        y = int(self.df.label[i])
-        return x, y
+        p = self.df.loc[i, 'filename']
+        if not os.path.exists(p):
+            raise FileNotFoundError(f"Image not found: {p}")
+        img = Image.open(p).convert('RGB')
+        x = self.transform(img)
+        y = int(self.df.loc[i, 'label_idx'])
+        return x, torch.tensor(y, dtype=torch.long)
 
-tr_ds, va_ds = ImgDS(tr_df), ImgDS(va_df)
+transform = transforms.Compose([
+    transforms.Resize((224,224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=(0.485,0.456,0.406), std=(0.229,0.224,0.225))
+])
 
-# ---------- лоадеры (Windows-safe) ----------
-num_workers = 0
-batch = min(BATCH, max(8, len(tr_ds)//4))
-tr = DataLoader(tr_ds, batch_size=batch, shuffle=True,  num_workers=num_workers, pin_memory=True)
-va = DataLoader(va_ds, batch_size=min(batch*2, len(va_ds)), shuffle=False, num_workers=num_workers, pin_memory=True)
+train_df = df.sample(frac=0.8, random_state=42)
+val_df = df.drop(train_df.index)
 
-# ---------- модель ----------
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-m = tv.models.resnet18(weights=None, num_classes=3)
-m.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
-m.to(device)
+# num_workers=0 -> no subprocesses for loading (safe on Windows / CPU-only)
+train_dl = DataLoader(ImgDataset(train_df, transform),
+                      batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=False)
+val_dl   = DataLoader(ImgDataset(val_df, transform),
+                      batch_size=VAL_BATCH, shuffle=False, num_workers=0, pin_memory=False)
 
-# class weights от дисбаланса
-vals = tr_df["label"].value_counts(normalize=True).to_dict()
-w = torch.tensor([1/vals.get(0,1e-9), 1/vals.get(1,1e-9), 1/vals.get(2,1e-9)], dtype=torch.float32, device=device)
+# --- create backbone (diagnostics) ---
+print("Creating model. If pretrained=True this may download weights to cache (~/.cache/torch/...).")
+t0 = time.time()
+try:
+    backbone = timm.create_model(MODEL_NAME, pretrained=PRETRAINED, num_classes=0, global_pool='avg')
+except Exception as e:
+    print("Model creation failed:", e)
+    print("Retrying with pretrained=False ...")
+    backbone = timm.create_model(MODEL_NAME, pretrained=False, num_classes=0, global_pool='avg')
+t1 = time.time()
+print(f"Model created in {t1-t0:.1f}s. num_features={backbone.num_features}")
 
-opt = torch.optim.AdamW(m.parameters(), lr=1e-3, weight_decay=1e-4)
-crit = nn.CrossEntropyLoss(weight=w)
+feat_dim = backbone.num_features
+for p in backbone.parameters():
+    p.requires_grad = False
 
-# ---------- обучение ----------
-for epoch in range(EPOCHS):
-    m.train()
-    loss_sum = 0.0
-    for xb, yb in tr:
-        xb = xb.to(device); yb = torch.as_tensor(yb, device=device)
+head = nn.Sequential(
+    nn.Linear(feat_dim, 512),
+    nn.ReLU(),
+    nn.Dropout(0.3),
+    nn.Linear(512, len(label_to_idx))
+)
+
+model = nn.Sequential(backbone, head).to(DEVICE)
+
+# optimizer and loss
+opt = optim.Adam(head.parameters(), lr=3e-4, weight_decay=1e-4)
+class_weights = torch.ones(len(label_to_idx), dtype=torch.float32).to(DEVICE)
+crit = nn.CrossEntropyLoss(weight=class_weights)
+
+# training loop with tqdm and proper loss.item()
+best_val = -1.0
+for epoch in range(NUM_EPOCHS):
+    model.train()
+    train_loss = 0.0
+    n_samples = 0
+    pbar = tqdm(train_dl, desc=f"Epoch {epoch:02d} [train]", leave=False)
+    for xb, yb in pbar:
+        xb = xb.to(DEVICE)
+        yb = yb.to(DEVICE)
+        logits = model(xb)
+        loss = crit(logits, yb)
         opt.zero_grad()
-        out = m(xb)
-        loss = crit(out, yb)
-        loss.backward(); opt.step()
-        loss_sum += loss.item() * xb.size(0)
+        loss.backward()
+        opt.step()
 
-    m.eval()
+        batch_loss = loss.item()
+        train_loss += batch_loss * xb.size(0)
+        n_samples += xb.size(0)
+        pbar.set_postfix({"batch_loss": f"{batch_loss:.4f}"})
+
+    avg_train_loss = train_loss / max(1, n_samples)
+
+    # validation
+    model.eval()
+    tot, ok = 0, 0
     with torch.no_grad():
-        correct, total = 0, 0
-        for xb, yb in va:
-            xb = xb.to(device); yb = torch.as_tensor(yb, device=device)
-            pred = m(xb).argmax(1)
-            correct += (pred == yb).sum().item()
-            total += yb.numel()
-    print(f"epoch {epoch:02d} | train_loss={loss_sum/max(1,len(tr_ds)):.4f} | val_acc={correct/max(1,total):.3f}")
+        for xb, yb in tqdm(val_dl, desc=f"Epoch {epoch:02d} [val]  ", leave=False):
+            xb = xb.to(DEVICE)
+            yb = yb.to(DEVICE)
+            preds = model(xb).argmax(dim=1)
+            tot += yb.size(0)
+            ok += (preds == yb).sum().item()
 
-# joblib.dump(m.cpu(), "../models/cv_resnet18.pkl")
-torch.save(m.cpu().state_dict(), "../models/cv_resnet18.pt")
+    val_acc = ok / tot if tot > 0 else 0.0
+    print(f"Epoch {epoch:02d}: train_loss={avg_train_loss:.4f}  val_acc={val_acc:.4f}")
+
+    ckpt = {
+        "epoch": epoch,
+        "model_state": model.state_dict(),
+        "optimizer_state": opt.state_dict(),
+        "val_acc": val_acc,
+        "label_to_idx": label_to_idx
+    }
+    torch.save(ckpt, MODEL_DIR / f"chk_epoch{epoch:03d}.pth")
+    if val_acc > best_val:
+        best_val = val_acc
+        torch.save(ckpt, MODEL_DIR / "best_model.pth")
+
+print("Training finished. Best val_acc:", best_val)
