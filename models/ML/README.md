@@ -6,14 +6,25 @@ The same type of data that we have in the file **"SBER_dataset_5m.csv"**.
 
 The file with the new data must be in the format .csv and contain all the columns from the list:
 
-    'close',
+    'open', 
+    'high', 
+    'low', 
+    'close', 
     'volume',
+    'sma_5', 
+    'sma_10', 
+    'ema_10', 
+    'ema_20', 
     'sma_ratio',
-    'rsi',
+    'rsi', 
+    'boll_mid', 
+    'boll_std', 
+    'boll_up', 
+    'boll_low', 
     'boll_pos',
-    'boll_std',
-    'momentum_5',
-    'log_ret',
+    'momentum_5', 
+    'momentum_10', 
+    'log_ret', 
     'atr'
 
 ## Usage
@@ -27,3 +38,4 @@ new_data_path = "new_data.csv"  # for example
 predict_new_data(model_path, new_data_path).to_csv('predicted_data.csv', index=False)
 
 ```
+In the created file, the "predicted_label" column contains the values up/flat/down for each record.
