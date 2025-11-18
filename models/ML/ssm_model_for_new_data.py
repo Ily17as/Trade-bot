@@ -195,5 +195,5 @@ def predict_new_data(model_path, new_data_path, sequence_length=60):
 
 
 model_path = "best_ssm_model.pth"
-new_data_path = "../../data/SBER_dataset_5m.csv"
+new_data_path = "new_data.csv"  # change it
 predict_new_data(model_path, new_data_path).to_csv('predicted_data.csv', index=False)
