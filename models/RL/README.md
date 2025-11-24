@@ -25,4 +25,3 @@ print(results[["close", "rl_signal", "rl_size_pct"]].head())
 - **Action space**: 3-way direction (flat/long/short) plus a continuous size head (0–1) mapped to 1–100% of capital.
 - **Reward**: outcome of hitting TP/SL on the next bar (using high/low), or fallback to next close; scaled by size.
 - **Stability tricks**: feature standardization via `nan_to_num`, LayerNorm backbone, gradient clipping, and return normalization.
-- **Extensibility**: plug in your own `progress_cb` for logging; swap `PolicyNet`/`REINFORCEAgent` with PPO or any other algorithm while reusing `TradingEnv` and `add_technical_columns`.
