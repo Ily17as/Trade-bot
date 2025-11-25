@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -77,4 +77,33 @@ class TradingAgent:
         return int(action)
 
 
-__all__ = ["TradingAgent", "FEATURE_COLUMNS"]
+class RLAgent:
+    """Thin wrapper around PPO policy with helper labels for inference."""
+
+    ACTION_LABELS = {0: "flat", 1: "long", 2: "short"}
+
+    def __init__(
+        self,
+        model_path: str | Path,
+        window_size: int = 32,
+        initial_balance: float = 100_000.0,
+    ) -> None:
+        self.model = PPO.load(str(model_path))
+        self.window_size = window_size
+        self.initial_balance = initial_balance
+
+    def get_action(self, features: pd.DataFrame, state: PortfolioState) -> Tuple[int, str]:
+        """Return deterministic action and a readable label for the latest window."""
+
+        if features.empty:
+            raise ValueError("RLAgent cannot act on an empty feature frame")
+
+        observation = build_observation_window(
+            features, state, self.window_size, self.initial_balance
+        )
+        action, _ = self.model.predict(np.expand_dims(observation, axis=0), deterministic=True)
+        action_idx = int(action)
+        return action_idx, self.ACTION_LABELS.get(action_idx, "unknown")
+
+
+__all__ = ["TradingAgent", "RLAgent", "FEATURE_COLUMNS"]
