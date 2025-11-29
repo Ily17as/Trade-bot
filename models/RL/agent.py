@@ -10,6 +10,31 @@ from stable_baselines3 import PPO
 
 from .env import FEATURE_COLUMNS, PortfolioState, build_feature_frame, build_observation_window
 
+def _resolve_checkpoint_path(model_path: str | Path) -> Path:
+    """Return a normalized, existing checkpoint path or raise a clear error.
+
+    The PPO loader expects a ``.zip`` file. When the provided path is missing,
+    Stable Baselines appends an extra ``.zip`` while searching, which results in
+    a confusing ``.zip.zip`` error. This helper validates the path up-front and
+    surfaces a concise message that also hints at the training entrypoint.
+    """
+
+    checkpoint_path = Path(model_path)
+
+    # If a directory is provided, assume the default checkpoint filename.
+    if checkpoint_path.is_dir():
+        checkpoint_path = checkpoint_path / "ppo_trading_agent.zip"
+    elif checkpoint_path.suffix == "":
+        checkpoint_path = checkpoint_path.with_suffix(".zip")
+
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(
+            "RL checkpoint not found at "
+            f"{checkpoint_path}. Train the model via app/RL/train_ppo.py "
+            "or disable RL inference (use_rl=False)."
+        )
+
+    return checkpoint_path
 
 class TradingAgent:
     """Utility class to run a trained PPO model over a price series."""
@@ -21,7 +46,8 @@ class TradingAgent:
         window_size: int = 32,
         initial_balance: float = 100_000.0,
     ) -> None:
-        self.model = PPO.load(str(model_path))
+        checkpoint_path = _resolve_checkpoint_path(model_path)
+        self.model = PPO.load(str(checkpoint_path))
         self.features = build_feature_frame(data)
         self.window_size = window_size
         self.initial_balance = initial_balance
@@ -88,22 +114,45 @@ class RLAgent:
         window_size: int = 32,
         initial_balance: float = 100_000.0,
     ) -> None:
-        self.model = PPO.load(str(model_path))
+        checkpoint_path = _resolve_checkpoint_path(model_path)
+        self.model = PPO.load(str(checkpoint_path))
         self.window_size = window_size
         self.initial_balance = initial_balance
 
-    def get_action(self, features: pd.DataFrame, state: PortfolioState) -> Tuple[int, str]:
-        """Return deterministic action and a readable label for the latest window."""
-
+    def get_action(
+        self, features: pd.DataFrame, state: PortfolioState
+    ) -> Tuple[float, str, float]:
+        """
+        Возвращает:
+        - raw_position: число в [-1, 1], где знак — направление, модуль — доля капитала;
+        - label: 'flat' / 'long' / 'short';
+        - size_frac: [0, 1], доля капитала по модулю.
+        """
         if features.empty:
             raise ValueError("RLAgent cannot act on an empty feature frame")
 
         observation = build_observation_window(
             features, state, self.window_size, self.initial_balance
         )
-        action, _ = self.model.predict(np.expand_dims(observation, axis=0), deterministic=True)
-        action_idx = int(action)
-        return action_idx, self.ACTION_LABELS.get(action_idx, "unknown")
+        action, _ = self.model.predict(
+            np.expand_dims(observation, axis=0),
+            deterministic=True,
+        )
 
+        raw = float(np.array(action).squeeze())
+        raw = float(np.clip(raw, -1.0, 1.0))
+        size_frac = abs(raw)
+
+        eps = 1e-3
+        if size_frac < eps:
+            label = "flat"
+            size_frac = 0.0
+        elif raw > 0:
+            label = "long"
+        else:
+            label = "short"
+
+        return raw, label, size_frac
+    
 
 __all__ = ["TradingAgent", "RLAgent", "FEATURE_COLUMNS"]

@@ -42,33 +42,23 @@ def build_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
     for col in ("open", "high", "low", "close"):
         if col not in data.columns:
             raise ValueError(f"Missing required price column: {col}")
-        
-    for col in ("open", "high", "low", "close"):
-        data[col] = pd.to_numeric(data[col], errors="coerce")
 
     data.sort_index(inplace=True)
     data = data.reset_index(drop=True)
-    data = data.dropna(subset=["open", "high", "low", "close"])
-
-    positive_mask = (data[["open", "high", "low", "close"]] > 0).all(axis=1)
-    data = data.loc[positive_mask].copy()
-    if data.empty:
-        raise ValueError("Price data is empty after removing invalid rows")
 
     if "volume" not in data.columns:
         data["volume"] = 0.0
 
-    safe_close = data["close"].clip(lower=1e-8)
-    data["log_return"] = np.log(safe_close).diff().fillna(0.0)
+    data["log_return"] = np.log(data["close"]).diff().fillna(0.0)
     data["volatility"] = (
         data["log_return"].rolling(window=20, min_periods=5).std().fillna(0.0)
     )
 
-    sma_fast = safe_close.rolling(window=5, min_periods=1).mean()
-    sma_slow = safe_close.rolling(window=20, min_periods=1).mean()
+    sma_fast = data["close"].rolling(window=5, min_periods=1).mean()
+    sma_slow = data["close"].rolling(window=20, min_periods=1).mean()
     data["sma_ratio"] = (sma_fast / sma_slow - 1).fillna(0.0)
 
-    delta = safe_close.diff()
+    delta = data["close"].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
     avg_gain = gain.rolling(window=14, min_periods=1).mean()
@@ -76,7 +66,7 @@ def build_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
     rs = avg_gain / (avg_loss + 1e-6)
     data["rsi"] = 100 - (100 / (1 + rs))
 
-    tr = _true_range(data["high"], data["low"], safe_close)
+    tr = _true_range(data["high"], data["low"], data["close"])
     data["atr"] = tr.rolling(window=14, min_periods=1).mean().fillna(0.0)
 
     volume_mean = data["volume"].rolling(window=30, min_periods=1).mean()
@@ -96,8 +86,16 @@ def build_observation_window(
 
     start = max(0, state.pointer - window_size + 1)
     window = features.iloc[start : state.pointer + 1]
+
+    # После reindex появятся строки, которых нет в features → NaN.
     padded = window.reindex(range(state.pointer - window_size + 1, state.pointer + 1))
-    obs_window = padded[FEATURE_COLUMNS].fillna(0.0).to_numpy(dtype=np.float32)
+
+    # КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: заполняем NaN нулями, потом в numpy.
+    obs_window = (
+        padded[FEATURE_COLUMNS]
+        .fillna(0.0)                      # <-- вот этого не хватало
+        .to_numpy(dtype=np.float32)
+    )
 
     if len(obs_window) < window_size:
         pad_rows = window_size - len(obs_window)
@@ -131,7 +129,11 @@ class TradingEnv(Env):
         self.trading_fee = trading_fee
 
         self.features = build_feature_frame(data)
-        self.action_space = spaces.Discrete(3)  # flat, long, short
+        self.action_space = spaces.Box(
+            low=np.array([-1.0], dtype=np.float32),
+            high=np.array([1.0], dtype=np.float32),
+            dtype=np.float32,
+        )
         obs_shape = (self.window_size, len(FEATURE_COLUMNS) + 2)
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=obs_shape, dtype=np.float32
@@ -149,8 +151,10 @@ class TradingEnv(Env):
         )
         return self._latest_observation, {}
 
-    def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, dict]:
-        assert self.action_space.contains(action), "Invalid action"
+    def step(self, action) -> Tuple[np.ndarray, float, bool, bool, dict]:
+        # Приводим к скаляру и режем в [-1, 1]
+        action_value = float(np.array(action).squeeze())
+        action_value = float(np.clip(action_value, -1.0, 1.0))
 
         current_idx = self.state.pointer
         done = current_idx >= len(self.features) - 1
@@ -161,12 +165,18 @@ class TradingEnv(Env):
         price_now = float(self.features.iloc[current_idx]["close"])
         price_next = float(self.features.iloc[next_idx]["close"])
 
-        new_position = {0: 0, 1: 1, 2: -1}[int(action)]
-        denominator = price_now if price_now != 0 else 1e-8
-        price_change = (price_next - price_now) / denominator
-        reward = new_position * price_change
+        # -1..1 = доля капитала в позиции (от полной шорта до полной лонга)
+        new_position = action_value
 
-        if self.trading_fee > 0 and new_position != self.state.position:
+        # Можно отрезать совсем маленькие позиции как flat:
+        if abs(new_position) < 1e-3:
+            new_position = 0.0
+
+        price_change = (price_next - price_now) / price_now
+        reward = new_position * price_change  # доля * доходность
+
+        # Комиссия, если сильно изменили позицию (опционально)
+        if self.trading_fee > 0 and np.sign(new_position) != np.sign(self.state.position):
             reward -= self.trading_fee
 
         equity = self.state.equity * (1 + reward)

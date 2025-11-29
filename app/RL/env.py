@@ -86,8 +86,16 @@ def build_observation_window(
 
     start = max(0, state.pointer - window_size + 1)
     window = features.iloc[start : state.pointer + 1]
+
+    # После reindex появятся строки, которых нет в features → NaN.
     padded = window.reindex(range(state.pointer - window_size + 1, state.pointer + 1))
-    obs_window = padded[FEATURE_COLUMNS].to_numpy(dtype=np.float32)
+
+    # КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: заполняем NaN нулями, потом в numpy.
+    obs_window = (
+        padded[FEATURE_COLUMNS]
+        .fillna(0.0)                      # <-- вот этого не хватало
+        .to_numpy(dtype=np.float32)
+    )
 
     if len(obs_window) < window_size:
         pad_rows = window_size - len(obs_window)
@@ -121,7 +129,11 @@ class TradingEnv(Env):
         self.trading_fee = trading_fee
 
         self.features = build_feature_frame(data)
-        self.action_space = spaces.Discrete(3)  # flat, long, short
+        self.action_space = spaces.Box(
+            low=np.array([-1.0], dtype=np.float32),
+            high=np.array([1.0], dtype=np.float32),
+            dtype=np.float32,
+        )
         obs_shape = (self.window_size, len(FEATURE_COLUMNS) + 2)
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=obs_shape, dtype=np.float32
@@ -139,8 +151,10 @@ class TradingEnv(Env):
         )
         return self._latest_observation, {}
 
-    def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, dict]:
-        assert self.action_space.contains(action), "Invalid action"
+    def step(self, action) -> Tuple[np.ndarray, float, bool, bool, dict]:
+        # Приводим к скаляру и режем в [-1, 1]
+        action_value = float(np.array(action).squeeze())
+        action_value = float(np.clip(action_value, -1.0, 1.0))
 
         current_idx = self.state.pointer
         done = current_idx >= len(self.features) - 1
@@ -151,11 +165,18 @@ class TradingEnv(Env):
         price_now = float(self.features.iloc[current_idx]["close"])
         price_next = float(self.features.iloc[next_idx]["close"])
 
-        new_position = {0: 0, 1: 1, 2: -1}[int(action)]
-        price_change = (price_next - price_now) / price_now
-        reward = new_position * price_change
+        # -1..1 = доля капитала в позиции (от полной шорта до полной лонга)
+        new_position = action_value
 
-        if self.trading_fee > 0 and new_position != self.state.position:
+        # Можно отрезать совсем маленькие позиции как flat:
+        if abs(new_position) < 1e-3:
+            new_position = 0.0
+
+        price_change = (price_next - price_now) / price_now
+        reward = new_position * price_change  # доля * доходность
+
+        # Комиссия, если сильно изменили позицию (опционально)
+        if self.trading_fee > 0 and np.sign(new_position) != np.sign(self.state.position):
             reward -= self.trading_fee
 
         equity = self.state.equity * (1 + reward)

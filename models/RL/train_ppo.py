@@ -39,11 +39,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--initial-balance", type=float, default=100_000.0, help="Starting equity for the agent"
     )
-    parser.add_argument("--trading-fee", type=float, default=0.0, help="Per-trade fee")
+    parser.add_argument("--trading-fee", type=float, default=0.005, help="Per-trade fee")
     parser.add_argument(
         "--timesteps",
         type=int,
-        default=50_000,
+        default=500_000,
         help="Number of PPO training timesteps",
     )
     parser.add_argument(
