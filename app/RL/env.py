@@ -42,33 +42,23 @@ def build_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
     for col in ("open", "high", "low", "close"):
         if col not in data.columns:
             raise ValueError(f"Missing required price column: {col}")
-        
-    for col in ("open", "high", "low", "close"):
-        data[col] = pd.to_numeric(data[col], errors="coerce")
 
     data.sort_index(inplace=True)
     data = data.reset_index(drop=True)
-    data = data.dropna(subset=["open", "high", "low", "close"])
-
-    positive_mask = (data[["open", "high", "low", "close"]] > 0).all(axis=1)
-    data = data.loc[positive_mask].copy()
-    if data.empty:
-        raise ValueError("Price data is empty after removing invalid rows")
 
     if "volume" not in data.columns:
         data["volume"] = 0.0
 
-    safe_close = data["close"].clip(lower=1e-8)
-    data["log_return"] = np.log(safe_close).diff().fillna(0.0)
+    data["log_return"] = np.log(data["close"]).diff().fillna(0.0)
     data["volatility"] = (
         data["log_return"].rolling(window=20, min_periods=5).std().fillna(0.0)
     )
 
-    sma_fast = safe_close.rolling(window=5, min_periods=1).mean()
-    sma_slow = safe_close.rolling(window=20, min_periods=1).mean()
+    sma_fast = data["close"].rolling(window=5, min_periods=1).mean()
+    sma_slow = data["close"].rolling(window=20, min_periods=1).mean()
     data["sma_ratio"] = (sma_fast / sma_slow - 1).fillna(0.0)
 
-    delta = safe_close.diff()
+    delta = data["close"].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
     avg_gain = gain.rolling(window=14, min_periods=1).mean()
@@ -76,7 +66,7 @@ def build_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
     rs = avg_gain / (avg_loss + 1e-6)
     data["rsi"] = 100 - (100 / (1 + rs))
 
-    tr = _true_range(data["high"], data["low"], safe_close)
+    tr = _true_range(data["high"], data["low"], data["close"])
     data["atr"] = tr.rolling(window=14, min_periods=1).mean().fillna(0.0)
 
     volume_mean = data["volume"].rolling(window=30, min_periods=1).mean()
@@ -97,7 +87,7 @@ def build_observation_window(
     start = max(0, state.pointer - window_size + 1)
     window = features.iloc[start : state.pointer + 1]
     padded = window.reindex(range(state.pointer - window_size + 1, state.pointer + 1))
-    obs_window = padded[FEATURE_COLUMNS].fillna(0.0).to_numpy(dtype=np.float32)
+    obs_window = padded[FEATURE_COLUMNS].to_numpy(dtype=np.float32)
 
     if len(obs_window) < window_size:
         pad_rows = window_size - len(obs_window)
@@ -162,8 +152,7 @@ class TradingEnv(Env):
         price_next = float(self.features.iloc[next_idx]["close"])
 
         new_position = {0: 0, 1: 1, 2: -1}[int(action)]
-        denominator = price_now if price_now != 0 else 1e-8
-        price_change = (price_next - price_now) / denominator
+        price_change = (price_next - price_now) / price_now
         reward = new_position * price_change
 
         if self.trading_fee > 0 and new_position != self.state.position:
