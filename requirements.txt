@@ -12,3 +12,4 @@ torchvision
 matplotlib
 gymnasium
 stable-baselines3
+seaborn
