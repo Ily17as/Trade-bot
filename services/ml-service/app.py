@@ -59,7 +59,7 @@ def load_model():
 
     try:
         # Load PyTorch SSM model (primary - as requested)
-            ssm_path = Path("../models/ML/best_ssm_model.pth")
+            ssm_path = Path("/models/ML/models/best_ssm_model.pth")
             if ssm_path.exists():
                 config = {
                     'input_dim': 12,
@@ -79,18 +79,18 @@ def load_model():
                 raise FileNotFoundError("No ML model found")
 
         # Load scaler if it exists
-        scaler_path = Path("../models/ML/scaler.pkl")
-        if scaler_path.exists():
-            scaler = joblib.load(scaler_path)
-            print("✓ Loaded feature scaler")
-        else:
-            print("⚠ No scaler found, using raw features")
+            scaler_path = Path("/models/ML/models/scaler.pkl")
+            if scaler_path.exists():
+                scaler = joblib.load(scaler_path)
+                print("✓ Loaded feature scaler")
+            else:
+                print("⚠ No scaler found, using raw features")
 
-        # Define feature columns (from training script)
-        feature_columns = [
-            'close', 'volume', 'sma_ratio', 'rsi', 'boll_pos', 'boll_std',
-            'momentum_5', 'log_ret', 'atr', 'label-1', 'label-2', 'label-3'
-        ]
+        # Define feature columns (matching trained model)
+            feature_columns = [
+                'close', 'volume', 'sma_ratio', 'rsi', 'boll_pos', 'boll_std',
+                'momentum_5', 'log_ret', 'atr', 'label-1', 'label-2', 'label-3'
+            ]
 
     except Exception as e:
         print(f"Error loading ML model: {e}")
@@ -104,8 +104,8 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy().reset_index(drop=True)
 
     # Basic price features
-    df['logret'] = np.log(df['close']).diff()
-    df['ret_1'] = df['logret'].shift(1)
+    df['log_ret'] = np.log(df['close']).diff()
+    df['ret_1'] = df['log_ret'].shift(1)
 
     # Moving averages
     for w in [3, 5, 10]:
@@ -128,6 +128,7 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     df['boll_up'] = mid + 2 * std
     df['boll_low'] = mid - 2 * std
     df['boll_pos'] = (df['close'] - df['boll_low']) / (df['boll_up'] - df['boll_low'])
+    df['boll_std'] = std  # Add boll_std feature
 
     # Momentum
     df['momentum_5'] = df['close'] / df['close'].shift(5) - 1
@@ -168,7 +169,14 @@ async def predict(request: PredictionRequest):
             raise HTTPException(status_code=400, detail="Insufficient data for prediction")
 
         # Get latest features
-        latest_features = df_features.iloc[-1:][feature_columns]
+        latest_row = df_features.iloc[-1:].copy()
+
+        # Handle missing label features (set to 0 for inference)
+        for label_col in ['label-1', 'label-2', 'label-3']:
+            if label_col not in latest_row.columns:
+                latest_row[label_col] = 0.0
+
+        latest_features = latest_row[feature_columns]
 
         if scaler:
             features_scaled = scaler.transform(latest_features.values)
@@ -176,23 +184,42 @@ async def predict(request: PredictionRequest):
             features_scaled = latest_features.values
 
         # Make prediction (PyTorch SSM model)
+        # Model expects sequences of length 60
+        sequence_length = 60
+
         with torch.no_grad():
-            inputs = torch.FloatTensor(features_scaled).to(device)
+            # Create sequence by repeating current features 60 times
+            sequence = np.tile(features_scaled, (sequence_length, 1))  # (60, 12)
+            inputs = torch.FloatTensor(sequence).unsqueeze(0).to(device)  # (1, 60, 12)
+            print(f"Input shape: {inputs.shape}")
             outputs = model(inputs)
+            print(f"Model output shape: {outputs.shape}")
             probabilities = torch.nn.functional.softmax(outputs, dim=1)[0].cpu().numpy()
+            print(f"Probabilities shape: {probabilities.shape}, values: {probabilities}")
             predicted_class = np.argmax(probabilities)
+            print(f"Predicted class: {predicted_class}")
 
         confidence = float(probabilities[predicted_class])
 
-        # Map to labels
-        label_map = {0: 'up', 1: 'flat', 2: 'down'}
-        prediction = label_map.get(predicted_class, 'unknown')
-
-        probs_dict = {
-            'up': float(probabilities[0]),
-            'flat': float(probabilities[1]),
-            'down': float(probabilities[2])
-        }
+        # Map to labels (handle both 2-class and 3-class models)
+        if len(probabilities) == 2:
+            # Binary classification: up/down
+            label_map = {0: 'down', 1: 'up'}
+            prediction = label_map.get(predicted_class, 'unknown')
+            probs_dict = {
+                'up': float(probabilities[1]),
+                'flat': 0.0,  # No flat prediction for binary
+                'down': float(probabilities[0])
+            }
+        else:
+            # 3-class classification
+            label_map = {0: 'up', 1: 'flat', 2: 'down'}
+            prediction = label_map.get(predicted_class, 'unknown')
+            probs_dict = {
+                'up': float(probabilities[0]),
+                'flat': float(probabilities[1]),
+                'down': float(probabilities[2])
+            }
 
         return PredictionResponse(
             prediction=prediction,
@@ -202,6 +229,9 @@ async def predict(request: PredictionRequest):
         )
 
     except Exception as e:
+        print(f"Prediction error: {str(e)}")
+        print(f"Available columns in df_features: {list(df_features.columns)}")
+        print(f"Expected features: {feature_columns}")
         raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
 
 @app.get("/health")

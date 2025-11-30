@@ -210,3 +210,6 @@ __marimo__/
 
 
 data/cv
+models/CV/models/best_cv_model.pth
+.gitignore
+models/CV/models/best_cv_model.pth:Zone.Identifier

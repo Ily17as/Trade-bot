@@ -1,0 +1,9 @@
+streamlit>=1.28.0
+pandas>=2.2.0
+numpy>=1.24.0
+plotly>=5.17.0
+requests>=2.31.0
+python-dateutil>=2.8.2
+tinkoff-investments==0.2.0b118
+python-dotenv>=1.0.0
+matplotlib>=3.8.0
