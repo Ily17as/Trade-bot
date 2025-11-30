@@ -1,0 +1,103 @@
+services:
+  # Streamlit Frontend
+  streamlit-app:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "8501:8501"
+    environment:
+      - TINKOFF_TOKEN=${TINKOFF_TOKEN}
+    volumes:
+      - ./.env:/app/.env:ro
+    depends_on:
+      - cv-service
+      - ml-service
+      - stochastic-service
+      - rl-service
+    networks:
+      - trading-network
+    restart: unless-stopped
+
+  # CV Model Service
+  cv-service:
+    build:
+      context: ./services/cv-service
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/models:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - trading-network
+    restart: unless-stopped
+
+  # ML Model Service
+  ml-service:
+    build:
+      context: ./services/ml-service
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./models:/models:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8001/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - trading-network
+    restart: unless-stopped
+
+  # Stochastic Model Service
+  stochastic-service:
+    build:
+      context: ./services/stochastic-service
+      dockerfile: Dockerfile
+    ports:
+      - "8002:8002"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8002/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - trading-network
+    restart: unless-stopped
+
+  # RL Model Service
+  rl-service:
+    build:
+      context: ./services/rl-service
+      dockerfile: Dockerfile
+    ports:
+      - "8003:8003"
+    volumes:
+      - ./models:/models:ro
+      - ./app:/app/app:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8003/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - trading-network
+    restart: unless-stopped
+
+networks:
+  trading-network:
+    driver: bridge
+
+volumes:
+  models:
+    driver: local
