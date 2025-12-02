@@ -1,10 +1,10 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+import torch
+import torch.nn as nn
 import numpy as np
 from pathlib import Path
 from typing import Dict, Any
-from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv
 
 app = FastAPI(title="RL Model Service", version="1.0.0")
 
@@ -17,20 +17,36 @@ class PredictionResponse(BaseModel):
     action_name: str
 
 # Global variables
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model = None
+
+class QNet(nn.Module):
+    """Q-Network architecture matching the RL training"""
+    def __init__(self, n_obs, n_act=3):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_obs, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, n_act)
+        )
+
+    def forward(self, x):
+        return self.net(x)
 
 def load_model():
     """Load the trained RL model"""
     global model
 
     try:
-        model_path = Path("/app/app/trained_models/RL/checkpoints/ppo_trading_agent.zip")
+        model_path = Path("../models/rl_SBER_5m_dqn.pt")
         if not model_path.exists():
             # Try alternative paths
             alt_paths = [
-                Path("/models/RL/checkpoints/ppo_trading_agent.zip"),
-                Path("/models/rl_SBER_5m_dqn.pt"),
-                Path("/models/dqn_SBER_5m.pt")
+                Path("../models/app/RL/dqn_model.pt"),
+                Path("../app/RL/dqn_model.pt"),
+                Path("../models/dqn_SBER_5m.pt")
             ]
             for path in alt_paths:
                 if path.exists():
@@ -42,18 +58,14 @@ def load_model():
             model = "mock"  # Flag for mock mode
             return
 
-        # Load the PPO model
-        try:
-            model = PPO.load(model_path)
-            print(f"✓ PPO RL Model loaded from {model_path}")
-        except Exception as e:
-            print(f"Error loading PPO model: {e}")
-            print("Using mock predictions as fallback.")
-            model = "mock"
+        # Load the model
+        model = QNet(n_obs=6, n_act=3)  # 6 features, 3 actions
+        checkpoint = torch.load(model_path, map_location=device)
+        model.load_state_dict(checkpoint)
+        model.to(device)
+        model.eval()
 
-        # Uncomment the lines below when a simpler RL model is available:
-        # model = PPO.load(model_path)
-        # print(f"✓ PPO RL Model loaded from {model_path}")
+        print(f"✓ RL Model loaded from {model_path}")
 
     except Exception as e:
         print(f"Error loading RL model: {e}")
@@ -157,48 +169,18 @@ async def predict(request: PredictionRequest):
         else:
             # Compute features
             features = compute_rl_features(request.data)
+            features_tensor = torch.FloatTensor(features).unsqueeze(0).to(device)
 
-            try:
-                # PPO expects sequences of shape (window_size, n_features)
-                # Since we only have current data, create a sequence by repeating current observation
-                window_size = 32  # Based on error message expecting (32, 9)
+            # Get Q-values
+            with torch.no_grad():
+                q_values = model(features_tensor)[0]
 
-                # Create sequence by repeating current features
-                sequence = np.tile(features, (window_size, 1))  # Shape: (32, 6)
+            # Choose action (greedy)
+            action_idx = torch.argmax(q_values).item()
+            confidence = torch.softmax(q_values, dim=0)[action_idx].item()
 
-                # Add padding to reach 9 features if needed (environment might expect more features)
-                if sequence.shape[1] < 9:
-                    padding = np.zeros((window_size, 9 - sequence.shape[1]))
-                    sequence = np.concatenate([sequence, padding], axis=1)
-
-                # Reshape for PPO: (1, window_size, n_features)
-                obs = sequence.reshape(1, window_size, 9)
-
-                # Get action from PPO model
-                action, _states = model.predict(obs, deterministic=True)
-
-                # For confidence, we can use the value function or a simple heuristic
-                confidence = 0.75
-
-                # PPO action is already in the correct format (0, 1, 2), map to (-1, 0, 1)
-                action = int(action[0]) - 1
-
-            except Exception as e:
-                print(f"PPO prediction failed: {e}")
-                print("Falling back to mock predictions.")
-                # Fallback to mock predictions
-                momentum = features[5]  # momentum is the last feature
-                rsi = features[1]       # RSI is the second feature
-
-                if momentum > 0.01 and rsi < 0.7:  # Positive momentum and not overbought
-                    action = 1  # BUY
-                    confidence = 0.75
-                elif momentum < -0.01 or rsi > 0.8:  # Negative momentum or overbought
-                    action = -1  # SELL
-                    confidence = 0.75
-                else:
-                    action = 0  # HOLD
-                    confidence = 0.60
+            # Map action index to action (-1, 0, 1)
+            action = action_idx - 1
 
         # Action names
         action_names = {1: "BUY", -1: "SELL", 0: "HOLD"}
@@ -219,8 +201,8 @@ async def health_check():
     return {
         "status": "healthy",
         "model_loaded": model is not None,
-        "model_type": "mock" if model == "mock" else "ppo",
-        "algorithm": "PPO" if model != "mock" else "mock"
+        "model_type": "mock" if model == "mock" else "pytorch",
+        "device": str(device) if model != "mock" else "cpu"
     }
 
 if __name__ == "__main__":
