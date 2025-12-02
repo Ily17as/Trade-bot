@@ -3,7 +3,7 @@
 Experimental trading-bot framework built around **machine learning**, **computer vision**, **reinforcement learning**, and **stochastic modelling** to help evaluate stocks  
 (undervalued / fairly valued / overvalued) and eventually support **automated trading decisions**.
 
-> ⚠️ Educational / research project. Not investment advice. Use at your own risk and start with paper trading.
+> Educational / research project. Not investment advice. Use at your own risk and start with paper trading.
 
 ---
 
